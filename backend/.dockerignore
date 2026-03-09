@@ -1,0 +1,32 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Generated images (populated at runtime, not baked into the image)
+generated_images/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Alembic auto-generated (migrations are run at startup, not baked in)
+# Keep alembic/ source but skip any local state
+alembic/versions/__pycache__/

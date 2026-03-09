@@ -19,10 +19,13 @@ RUN playwright install chromium && playwright install-deps chromium
 # Copy application source
 COPY . .
 
-# Directory for AI-generated images (also mountable as a Docker volume)
+# Directory for AI-generated images (also mountable as a Docker volume / Render Disk)
 RUN mkdir -p generated_images
+
+# Make the startup script executable
+RUN chmod +x start.sh
 
 EXPOSE 8000
 
-# Run with uvicorn; override CMD or use docker-compose for hot-reload
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# start.sh honours the $PORT env var injected by Render (falls back to 8000).
+CMD ["./start.sh"]
