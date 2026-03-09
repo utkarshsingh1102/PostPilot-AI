@@ -57,6 +57,30 @@ def health():
 # Sources
 # ---------------------------------------------------------------------------
 
+@router.get("/scheduler/status", tags=["system"])
+def scheduler_status(request: Request):
+    """Return last/next run times for cron jobs in IST (Asia/Kolkata)."""
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        return {"error": "Scheduler not running"}
+
+    jobs = []
+    for job in scheduler.get_jobs():
+        next_run = job.next_run_time
+        last_run = getattr(job, "last_run_time", None)
+        jobs.append({
+            "id": job.id,
+            "name": job.name,
+            "next_run": next_run.astimezone(IST).isoformat() if next_run else None,
+            "last_run": last_run.astimezone(IST).isoformat() if last_run else None,
+        })
+    return {"jobs": jobs}
+
+
 @router.post("/sources", response_model=SourceResponse, status_code=201, tags=["sources"])
 def add_source(payload: SourceCreate, db: Session = Depends(get_db)):
     """Add a new LinkedIn profile or company page URL to monitor."""
@@ -183,9 +207,9 @@ def list_processed_posts(
     db: Session = Depends(get_db),
 ):
     """List processed posts. Only approved posts ever reach this table."""
-    q = db.query(ProcessedPost).join(ScrapedPost)
+    q = db.query(ProcessedPost)
     if source_id is not None:
-        q = q.filter(ScrapedPost.source_id == source_id)
+        q = q.filter(ProcessedPost.source_id == source_id)
     if status:
         try:
             status_enum = ProcessingStatus(status)

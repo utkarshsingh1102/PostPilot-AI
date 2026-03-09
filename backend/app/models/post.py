@@ -48,7 +48,9 @@ class ProcessedPost(Base):
     __tablename__ = "processed_posts"
 
     id = Column(Integer, primary_key=True, index=True)
-    scraped_post_id = Column(Integer, ForeignKey("scraped_posts.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    scraped_post_id = Column(Integer, ForeignKey("scraped_posts.id", ondelete="SET NULL"), unique=True, nullable=True, index=True)
+    source_id = Column(Integer, nullable=True, index=True)   # denormalized – survives source deletion
+    source_label = Column(String, nullable=True)              # denormalized – survives source deletion
     rewritten_post = Column(Text, nullable=True)
     hooks = Column(Text, nullable=True)
     hashtags = Column(JSON, nullable=True)  # list of strings

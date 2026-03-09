@@ -74,7 +74,9 @@ class ApprovalResponse(BaseModel):
 
 class ProcessedPostResponse(BaseModel):
     id: int
-    scraped_post_id: int
+    scraped_post_id: Optional[int]
+    source_id: Optional[int]
+    source_label: Optional[str]
     rewritten_post: Optional[str]
     hooks: Optional[str]
     hashtags: Optional[list[str]]

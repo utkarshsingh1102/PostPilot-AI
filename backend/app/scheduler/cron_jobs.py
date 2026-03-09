@@ -38,8 +38,11 @@ async def _process_one(db: Session, scraped: ScrapedPost) -> None:
     # Create or fetch the ProcessedPost record
     processed = db.query(ProcessedPost).filter_by(scraped_post_id=scraped.id).first()
     if processed is None:
+        source = db.query(Source).get(scraped.source_id)
         processed = ProcessedPost(
             scraped_post_id=scraped.id,
+            source_id=scraped.source_id,
+            source_label=source.label if source else Non1e,
             status=ProcessingStatus.pending,
         )
         db.add(processed)
@@ -186,6 +189,15 @@ def setup_scheduler() -> AsyncIOScheduler:
     Call .start() on the returned scheduler from main.py lifespan.
     """
     scheduler = AsyncIOScheduler()
+
+    # Track last_run_time on each job object
+    def _on_job_executed(event):
+        job = scheduler.get_job(event.job_id)
+        if job:
+            job.last_run_time = event.scheduled_run_time
+
+    from apscheduler.events import EVENT_JOB_EXECUTED
+    scheduler.add_listener(_on_job_executed, EVENT_JOB_EXECUTED)
 
     interval_hours = settings.SCRAPE_INTERVAL_HOURS
 
