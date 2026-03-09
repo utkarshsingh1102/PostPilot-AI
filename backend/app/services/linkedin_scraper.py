@@ -11,9 +11,13 @@ Design notes:
 - DOES NOT publish, like, comment, or interact with LinkedIn in any way.
 """
 
+import asyncio
+import hashlib
 import logging
 import re
+import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from playwright.async_api import async_playwright, Page, BrowserContext, TimeoutError as PWTimeout
 
@@ -44,14 +48,44 @@ async def _login(page: Page) -> bool:
         return False
 
 
-async def _extract_post_data(update_element) -> Optional[dict]:
+async def _download_image(url: str, save_dir: str) -> Optional[str]:
+    """Download an image from a CDN URL and save locally. Returns local path or None."""
+    try:
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+        ext = "jpg"
+        if ".png" in url.lower():
+            ext = "png"
+        elif ".webp" in url.lower():
+            ext = "webp"
+        filename = f"scraped_{hashlib.md5(url.encode()).hexdigest()}.{ext}"
+        save_path = str(Path(save_dir) / filename)
+        await asyncio.to_thread(urllib.request.urlretrieve, url, save_path)
+        logger.debug("Downloaded scraped image to %s", save_path)
+        return save_path
+    except Exception as exc:
+        logger.warning("Failed to download image %s: %s", url, exc)
+        return None
+
+
+async def _extract_post_data(update_element, images_dir: Optional[str] = None) -> Optional[dict]:
     """Extract fields from a single feed-shared-update-v2 element."""
     try:
-        # Post text
-        text_el = await update_element.query_selector(
-            "div.feed-shared-update-v2__description-wrapper span[dir='ltr']"
-        )
-        post_text = (await text_el.inner_text()).strip() if text_el else None
+        # Post text — try multiple selectors (LinkedIn changes its DOM regularly)
+        post_text = None
+        for text_selector in [
+            ".update-components-text span[dir='ltr']",
+            "div.feed-shared-inline-show-more-text span[dir='ltr']",
+            "div.feed-shared-update-v2__description-wrapper span[dir='ltr']",
+            ".feed-shared-text span[dir='ltr']",
+            "div.update-components-text relative-time-news-block-description",
+            "span[dir='ltr'].break-words",
+        ]:
+            text_el = await update_element.query_selector(text_selector)
+            if text_el:
+                candidate = (await text_el.inner_text()).strip()
+                if candidate:
+                    post_text = candidate
+                    break
 
         # Canonical post link (activity URN link)
         link_el = await update_element.query_selector(
@@ -67,11 +101,26 @@ async def _extract_post_data(update_element) -> Optional[dict]:
             if urn:
                 post_link = f"https://www.linkedin.com/feed/update/{urn}/"
 
-        # Image
-        img_el = await update_element.query_selector(
-            "img.ivm-view-attr__img--centered, div.update-components-image img"
-        )
-        image_url = await img_el.get_attribute("src") if img_el else None
+        # Post image — exclude profile avatars and company logos, download immediately
+        image_url = None
+        for img_selector in [
+            "div.update-components-image img",
+            "div.update-components-linkedin-video img",
+            "img.update-components-image__image",
+        ]:
+            img_el = await update_element.query_selector(img_selector)
+            if img_el:
+                src = await img_el.get_attribute("src") or ""
+                if any(skip in src for skip in ("company-logo", "profile-displayphoto", "ghost-person")):
+                    continue
+                if src:
+                    # Download now while the CDN URL is fresh
+                    if images_dir:
+                        local_path = await _download_image(src, images_dir)
+                        image_url = local_path  # store local path; None if download failed
+                    else:
+                        image_url = src
+                    break
 
         # Timestamp
         time_el = await update_element.query_selector(
@@ -83,6 +132,9 @@ async def _extract_post_data(update_element) -> Optional[dict]:
         if not post_link:
             logger.debug("Skipping update element - could not determine post_link.")
             return None
+
+        if not post_text:
+            logger.debug("Post %s has no extractable text (image-only or selector mismatch).", post_link)
 
         return {
             "post_link": post_link,
@@ -123,6 +175,7 @@ async def scrape_source(
     url: str,
     max_posts: int = 100,
     since_date: Optional[datetime] = None,
+    images_dir: Optional[str] = None,
 ) -> list[dict]:
     """
     Scrape posts from a LinkedIn profile or company page.
@@ -193,7 +246,7 @@ async def scrape_source(
                 if len(posts) >= max_posts:
                     break
 
-                data = await _extract_post_data(el)
+                data = await _extract_post_data(el, images_dir=images_dir)
                 if not data or not data["post_link"]:
                     continue
 

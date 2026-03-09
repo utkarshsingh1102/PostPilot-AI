@@ -20,7 +20,7 @@ apscheduler==3.10.4
 anthropic==0.40.0
 
 # AI – Gemini
-google-generativeai==0.8.3
+google-genai==1.66.0
 
 # Validation / data
 pydantic==2.10.3

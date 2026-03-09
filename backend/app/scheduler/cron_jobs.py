@@ -22,10 +22,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Source, ScrapedPost, ProcessedPost, ProcessingStatus
+from app.models import Source, ScrapedPost, ProcessedPost, ProcessingStatus, ApprovalStatus
 from app.services.linkedin_scraper import scrape_source
 from app.services.claude_rewriter import rewrite_post, build_copy_ready_text
-from app.services.gemini_image_generator import generate_image
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,15 @@ async def _process_one(db: Session, scraped: ScrapedPost) -> None:
     try:
         # ---- Claude rewrite ----
         if not scraped.post_text or not scraped.post_text.strip():
-            raise ValueError("Empty post text – nothing to rewrite.")
+            processed.status = ProcessingStatus.failed
+            processed.error_message = (
+                "Post has no text content. It may be image-only or the scraper "
+                "selector didn't match. Re-scrape or enter text manually."
+            )
+            processed.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.warning("[cron] Skipping scraped_post id=%d — no text to rewrite.", scraped.id)
+            return
 
         logger.info("[cron] Rewriting scraped_post id=%d via Claude.", scraped.id)
         rewrite_result = await rewrite_post(scraped.post_text)
@@ -68,16 +75,8 @@ async def _process_one(db: Session, scraped: ScrapedPost) -> None:
         processed.hooks = rewrite_result["hooks"]
         processed.hashtags = rewrite_result["hashtags"]
 
-        # ---- Gemini image generation ----
-        if scraped.image_url:
-            logger.info("[cron] Generating image for scraped_post id=%d via Gemini.", scraped.id)
-            image_path = await generate_image(
-                rewritten_post=rewrite_result["rewritten_post"],
-                original_image_url=scraped.image_url,
-            )
-            processed.generated_image_url = image_path
-        else:
-            logger.debug("[cron] No original image for scraped_post id=%d – skipping image gen.", scraped.id)
+        # ---- Use scraped image as output ----
+        processed.generated_image_url = scraped.image_url
 
         processed.status = ProcessingStatus.completed
         processed.error_message = None
@@ -110,7 +109,11 @@ async def scrape_all_sources() -> None:
         for source in sources:
             logger.info("[cron] Scraping source id=%d url=%s", source.id, source.linkedin_url)
             try:
-                posts = await scrape_source(source.linkedin_url, since_date=since_date)
+                posts = await scrape_source(
+                    source.linkedin_url,
+                    since_date=since_date,
+                    images_dir=settings.GENERATED_IMAGES_DIR,
+                )
             except Exception as exc:
                 logger.error("[cron] Scraping failed for source %d: %s", source.id, exc)
                 continue
@@ -147,18 +150,22 @@ async def process_pending_posts() -> None:
     logger.info("[cron] process_pending_posts – started at %s", datetime.now(timezone.utc).isoformat())
     db: Session = SessionLocal()
     try:
-        # Unprocessed = ScrapedPost that has no ProcessedPost, OR whose status is failed/pending
+        # Only process posts that an admin has explicitly approved.
+        # pending_review and rejected posts are never auto-processed.
         processed_ids = db.query(ProcessedPost.scraped_post_id).filter(
             ProcessedPost.status == ProcessingStatus.completed
         ).subquery()
 
         pending = (
             db.query(ScrapedPost)
-            .filter(ScrapedPost.id.not_in(processed_ids))
+            .filter(
+                ScrapedPost.approval_status == ApprovalStatus.approved,
+                ScrapedPost.id.not_in(processed_ids),
+            )
             .all()
         )
 
-        logger.info("[cron] %d post(s) pending processing.", len(pending))
+        logger.info("[cron] %d approved post(s) pending processing.", len(pending))
 
         for scraped in pending:
             await _process_one(db, scraped)

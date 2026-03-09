@@ -9,22 +9,20 @@ IMPORTANT: This service only GENERATES images locally and stores them.
 It does NOT publish anything to LinkedIn or any other social platform.
 """
 
-import base64
 import logging
-import os
 import uuid
 from pathlib import Path
 from typing import Optional
 
-import google.generativeai as genai
-from google.generativeai import types as genai_types
+from google import genai
+from google.genai import types as genai_types
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Initialise the Gemini SDK once
-genai.configure(api_key=settings.GEMINI_API_KEY)
+# Initialise the Gemini client once
+_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
 # Local directory where generated images are saved
 _IMAGES_DIR = Path(settings.GENERATED_IMAGES_DIR)
@@ -74,29 +72,20 @@ async def generate_image(rewritten_post: str, original_image_url: Optional[str] 
     logger.info("Requesting image from Gemini (prompt length=%d chars).", len(prompt))
 
     try:
-        model = genai.GenerativeModel(model_name=settings.GEMINI_MODEL)
-
-        response = model.generate_content(
+        response = _client.models.generate_content(
+            model="gemini-2.0-flash-exp-image-generation",
             contents=prompt,
-            generation_config=genai_types.GenerationConfig(
-                response_mime_type="image/png",
+            config=genai_types.GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
             ),
         )
 
         # Extract image bytes from response
         image_bytes: Optional[bytes] = None
-        for part in response.parts:
-            if hasattr(part, "inline_data") and part.inline_data:
-                image_bytes = base64.b64decode(part.inline_data.data)
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_bytes = part.inline_data.data
                 break
-
-        if not image_bytes:
-            # Some Gemini model versions return base64 text directly
-            if response.text:
-                try:
-                    image_bytes = base64.b64decode(response.text)
-                except Exception:
-                    pass
 
         if not image_bytes:
             logger.warning("Gemini did not return image data in the response.")
@@ -113,7 +102,7 @@ async def generate_image(rewritten_post: str, original_image_url: Optional[str] 
 
     except Exception as exc:
         logger.error("Gemini image generation failed: %s", exc)
-        return None
+        raise
 
 
 def get_download_url(generated_image_path: Optional[str], base_url: str = "") -> Optional[str]:

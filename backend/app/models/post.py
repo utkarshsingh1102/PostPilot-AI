@@ -12,6 +12,12 @@ class ProcessingStatus(str, enum.Enum):
     failed = "failed"
 
 
+class ApprovalStatus(str, enum.Enum):
+    pending_review = "pending_review"  # freshly scraped, awaiting admin decision
+    approved = "approved"              # admin approved — eligible for AI processing
+    rejected = "rejected"              # admin rejected — will not be processed
+
+
 class ScrapedPost(Base):
     """Raw post data extracted from a LinkedIn source."""
 
@@ -23,6 +29,13 @@ class ScrapedPost(Base):
     post_text = Column(Text, nullable=True)
     image_url = Column(String, nullable=True)
     timestamp = Column(DateTime(timezone=True), nullable=True)
+    approval_status = Column(
+        SAEnum(ApprovalStatus),
+        default=ApprovalStatus.pending_review,
+        nullable=False,
+        index=True,
+    )
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     source = relationship("Source", backref="scraped_posts")

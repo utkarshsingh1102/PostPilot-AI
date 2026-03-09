@@ -4,7 +4,7 @@ Pydantic request/response schemas for all API endpoints.
 
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -43,9 +43,29 @@ class ScrapedPostResponse(BaseModel):
     post_text: Optional[str]
     image_url: Optional[str]
     timestamp: Optional[datetime]
+    approval_status: str
+    reviewed_at: Optional[datetime]
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ApprovalAction(BaseModel):
+    """Request body for approve/reject endpoints."""
+    action: str  # "approve" or "reject"
+
+    @field_validator("action")
+    @classmethod
+    def valid_action(cls, v: str) -> str:
+        if v not in ("approve", "reject"):
+            raise ValueError("action must be 'approve' or 'reject'.")
+        return v
+
+
+class ApprovalResponse(BaseModel):
+    scraped_post_id: int
+    approval_status: str
+    message: str
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +97,7 @@ class FullPostResponse(BaseModel):
     original_text: Optional[str]
     original_image_url: Optional[str]
     post_timestamp: Optional[datetime]
+    approval_status: str
 
     # Processed
     processed_post_id: Optional[int]
