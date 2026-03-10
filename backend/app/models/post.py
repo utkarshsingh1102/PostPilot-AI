@@ -55,9 +55,30 @@ class ProcessedPost(Base):
     hooks = Column(Text, nullable=True)
     hashtags = Column(JSON, nullable=True)  # list of strings
     generated_image_url = Column(String, nullable=True)
+    reimagine_status = Column(String, default="idle", nullable=False)  # "idle" | "generating"
     status = Column(SAEnum(ProcessingStatus), default=ProcessingStatus.pending, nullable=False, index=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     scraped_post = relationship("ScrapedPost", back_populates="processed")
+    image_versions = relationship(
+        "PostImageVersion", back_populates="processed_post",
+        order_by="PostImageVersion.created_at", cascade="all, delete-orphan",
+    )
+
+
+class PostImageVersion(Base):
+    """One Gemini-generated image version for a processed post. Multiple per post."""
+
+    __tablename__ = "post_image_versions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    processed_post_id = Column(
+        Integer, ForeignKey("processed_posts.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    image_path = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    processed_post = relationship("ProcessedPost", back_populates="image_versions")

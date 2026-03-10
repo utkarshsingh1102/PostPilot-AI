@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { Copy, Download, ExternalLink, CheckCheck, ImageOff, AlertCircle } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Copy, Download, ExternalLink, CheckCheck, ImageOff, AlertCircle, Sparkles, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn, formatDate, truncate } from "@/lib/utils";
+import { useReimaginePost } from "@/lib/hooks";
 import type { ProcessedPost } from "@/types/post";
 
 interface PostCardProps {
@@ -13,6 +14,30 @@ interface PostCardProps {
 
 export default function PostCard({ post, onOpen }: PostCardProps) {
   const [copied, setCopied] = useState(false);
+  // Local optimistic flag so the button disables instantly on click
+  const [localReimaging, setLocalReimaging] = useState(false);
+  // Track when the user triggered reimagine so we can detect fresh data even
+  // if reimagine_status never transitions through "generating" in the UI
+  // (happens when the backend completes the task faster than the first refetch).
+  const reimagineStartedRef = useRef<number | null>(null);
+
+  const reimagine = useReimaginePost();
+
+  // Clear local flag when post data is refreshed AND status is back to idle.
+  // Using post.updated_at (not just reimagine_status) ensures the effect fires
+  // even when the dep value stays "idle"→"idle" (fast completion / Gemini skip).
+  useEffect(() => {
+    if (
+      reimagineStartedRef.current !== null &&
+      post.reimagine_status === "idle" &&
+      new Date(post.updated_at).getTime() > reimagineStartedRef.current
+    ) {
+      reimagineStartedRef.current = null;
+      setLocalReimaging(false);
+    }
+  }, [post.updated_at, post.reimagine_status]);
+
+  const isReimaging = localReimaging || post.reimagine_status === "generating";
 
   // Build a copy-ready text from the processed post
   const copyText = [
@@ -34,7 +59,6 @@ export default function PostCard({ post, onOpen }: PostCardProps) {
   function handleDownload(e: React.MouseEvent) {
     e.stopPropagation();
     if (!post.generated_image_url) return;
-    // The generated_image_url is the local path; construct the download URL
     const filename = post.generated_image_url.split("/").pop();
     const downloadUrl = `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}/images/${filename}`;
     const a = document.createElement("a");
@@ -43,8 +67,23 @@ export default function PostCard({ post, onOpen }: PostCardProps) {
     a.click();
   }
 
+  async function handleReimagine(e: React.MouseEvent) {
+    e.stopPropagation();
+    setLocalReimaging(true);
+    reimagineStartedRef.current = Date.now();
+    try {
+      await reimagine.mutateAsync(post.id);
+      toast.success("Reimagining… new image will appear shortly");
+    } catch {
+      reimagineStartedRef.current = null;
+      setLocalReimaging(false);
+      toast.error("Reimagine failed");
+    }
+  }
+
   const isFailed = post.status === "failed";
   const isProcessing = post.status === "processing" || post.status === "pending";
+  const isCompleted = post.status === "completed";
 
   return (
     <article
@@ -56,7 +95,7 @@ export default function PostCard({ post, onOpen }: PostCardProps) {
       )}
     >
       {/* Image */}
-      <div className="aspect-video bg-zinc-800 overflow-hidden">
+      <div className="aspect-video bg-zinc-800 overflow-hidden relative">
         {post.generated_image_url ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -70,6 +109,14 @@ export default function PostCard({ post, onOpen }: PostCardProps) {
         ) : (
           <div className="w-full h-full flex items-center justify-center text-zinc-700">
             <ImageOff size={28} />
+          </div>
+        )}
+
+        {/* Reimagining overlay on the image */}
+        {isReimaging && (
+          <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2">
+            <Loader2 size={20} className="animate-spin text-violet-400" />
+            <span className="text-[11px] text-violet-300 font-medium">Generating new image…</span>
           </div>
         )}
       </div>
@@ -128,6 +175,21 @@ export default function PostCard({ post, onOpen }: PostCardProps) {
           <span className="text-[11px] text-zinc-600">{formatDate(post.created_at)}</span>
 
           <div className="flex items-center gap-1">
+            {/* Reimagine — only for completed posts that have an original image to work from */}
+            {isCompleted && post.generated_image_url && (
+              <button
+                onClick={handleReimagine}
+                disabled={isReimaging}
+                title={isReimaging ? "Generating…" : "Reimagine image with AI"}
+                className="p-1.5 rounded-md text-zinc-600 hover:text-violet-400 hover:bg-zinc-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isReimaging ? (
+                  <Loader2 size={13} className="animate-spin text-violet-400" />
+                ) : (
+                  <Sparkles size={13} />
+                )}
+              </button>
+            )}
             <button
               onClick={handleCopy}
               disabled={!copyText}
@@ -172,6 +234,7 @@ export function PostCardSkeleton() {
         <div className="flex justify-between">
           <div className="h-3 w-20 bg-zinc-800 rounded" />
           <div className="flex gap-1">
+            <div className="h-6 w-6 bg-zinc-800 rounded" />
             <div className="h-6 w-6 bg-zinc-800 rounded" />
             <div className="h-6 w-6 bg-zinc-800 rounded" />
           </div>

@@ -11,6 +11,8 @@ import {
   processAll,
   checkHealth,
   getSchedulerStatus,
+  getScrapingStatus,
+  reimaginePost,
 } from "./api";
 import type { SourceCreate } from "@/types/source";
 
@@ -59,6 +61,26 @@ export function useSchedulerStatus() {
     queryFn: getSchedulerStatus,
     refetchInterval: 60_000,
     retry: 1,
+  });
+}
+
+export function useScrapingStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ["scraping", "status"],
+    queryFn: getScrapingStatus,
+    // Poll aggressively only while we believe scraping is active
+    refetchInterval: enabled ? 3_000 : false,
+    retry: 0,
+  });
+}
+
+export function usePendingCount(sourceId?: number) {
+  return useQuery({
+    queryKey: ["posts", "pendingCount", sourceId],
+    queryFn: () => getRawPosts({ approval_status: "pending_review", source_id: sourceId, limit: 1, offset: 0 }),
+    select: (data) => data.length > 0,  // true = has pending posts
+    enabled: sourceId !== undefined,
+    staleTime: 10_000,
   });
 }
 
@@ -120,10 +142,10 @@ export function useFullPost(id: number | null) {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 export function useScrapeNow() {
-  const qc = useQueryClient();
   return useMutation({
     mutationFn: (sourceId?: number) => scrapeNow(sourceId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["posts"] }),
+    // Don't invalidate posts here — scraping is async in the backend.
+    // Topbar polls /scraping/status and invalidates when it detects completion.
   });
 }
 
@@ -132,5 +154,18 @@ export function useProcessAll() {
   return useMutation({
     mutationFn: () => processAll(),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["posts"] }),
+  });
+}
+
+export function useReimaginePost() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (processedPostId: number) => reimaginePost(processedPostId),
+    onSuccess: () => {
+      // Refresh the processed list so reimagine_status shows "generating"
+      qc.invalidateQueries({ queryKey: ["posts", "processed"] });
+      // Also refresh any open full-post drawer so it picks up the new status immediately
+      qc.invalidateQueries({ queryKey: ["post"] });
+    },
   });
 }

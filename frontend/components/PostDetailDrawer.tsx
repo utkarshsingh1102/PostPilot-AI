@@ -1,9 +1,12 @@
 "use client";
 
-import { X, ExternalLink, Copy, Download, ImageOff, Loader2, CheckCheck, AlertCircle } from "lucide-react";
-import { useState } from "react";
+import {
+  X, ExternalLink, Copy, Download, ImageOff, Loader2, CheckCheck,
+  AlertCircle, Sparkles, ChevronLeft, ChevronRight,
+} from "lucide-react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { useFullPost } from "@/lib/hooks";
+import { useFullPost, useReimaginePost } from "@/lib/hooks";
 import { cn, formatDate } from "@/lib/utils";
 
 interface PostDetailDrawerProps {
@@ -12,10 +15,70 @@ interface PostDetailDrawerProps {
 }
 
 export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerProps) {
-  const { data: post, isLoading } = useFullPost(postId);
+  const { data: post, isLoading, refetch, dataUpdatedAt } = useFullPost(postId);
+  const reimagine = useReimaginePost();
   const [copied, setCopied] = useState(false);
+  const [imageIndex, setImageIndex] = useState(0);
+  // Local optimistic flag so the button disables instantly
+  const [localReimaging, setLocalReimaging] = useState(false);
+  // Track when reimagine was triggered — used to detect fresh data even when
+  // reimagine_status goes idle→idle (fast completion / Gemini skip).
+  const reimagineStartedRef = useRef<number | null>(null);
+  // Stable ref to refetch so the polling interval doesn't recreate on each render.
+  const refetchRef = useRef(refetch);
+  useEffect(() => { refetchRef.current = refetch; }, [refetch]);
 
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+  // All image versions; fall back to single generated_image_url for old posts
+  const allImages: string[] = post?.image_versions?.length
+    ? post.image_versions.map((v) => v.image_path)
+    : post?.generated_image_url
+    ? [post.generated_image_url]
+    : [];
+
+  // Reset everything when a new post is opened.
+  // We also zero the ref so the "jump to latest" effect fires correctly when data loads.
+  const prevCountRef = useRef(0);
+  useEffect(() => {
+    setImageIndex(0);
+    setLocalReimaging(false);
+    reimagineStartedRef.current = null;
+    prevCountRef.current = 0;
+  }, [postId]);
+
+  // Auto-jump to the newest image whenever the version list grows
+  // (covers both initial load and incoming reimagine results).
+  useEffect(() => {
+    if (allImages.length > prevCountRef.current) {
+      setImageIndex(allImages.length - 1);
+    }
+    prevCountRef.current = allImages.length;
+  }, [allImages.length]);
+
+  // Poll while reimagining so the new image appears automatically.
+  // Uses a ref for refetch so the interval isn't recreated when refetch changes.
+  const isReimaging = localReimaging || post?.reimagine_status === "generating";
+  useEffect(() => {
+    if (!isReimaging) return;
+    refetchRef.current(); // fetch immediately — don't wait 2 s for first update
+    const id = setInterval(() => refetchRef.current(), 2000);
+    return () => clearInterval(id);
+  }, [isReimaging]);
+
+  // Clear local flag when fresh data arrives with status=idle.
+  // Uses dataUpdatedAt (TanStack Query's fetch timestamp) so the effect fires
+  // even when reimagine_status stays "idle"→"idle" (fast completion / Gemini skip).
+  useEffect(() => {
+    if (
+      reimagineStartedRef.current !== null &&
+      post?.reimagine_status === "idle" &&
+      dataUpdatedAt > reimagineStartedRef.current
+    ) {
+      reimagineStartedRef.current = null;
+      setLocalReimaging(false);
+    }
+  }, [dataUpdatedAt, post?.reimagine_status]);
 
   function imageUrl(path: string | null | undefined) {
     if (!path) return null;
@@ -33,7 +96,8 @@ export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerPr
   }
 
   function handleDownload() {
-    const url = post?.download_image_url ?? imageUrl(post?.generated_image_url);
+    const currentPath = allImages[imageIndex] ?? post?.generated_image_url;
+    const url = imageUrl(currentPath);
     if (!url) return;
     const a = document.createElement("a");
     a.href = url;
@@ -41,7 +105,23 @@ export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerPr
     a.click();
   }
 
+  async function handleReimagine() {
+    if (!post?.processed_post_id) return;
+    setLocalReimaging(true);
+    reimagineStartedRef.current = Date.now();
+    try {
+      await reimagine.mutateAsync(post.processed_post_id);
+      toast.success("Reimagining… new image will appear shortly");
+    } catch {
+      reimagineStartedRef.current = null;
+      setLocalReimaging(false);
+      toast.error("Reimagine failed");
+    }
+  }
+
   const open = postId !== null;
+  const currentImagePath = allImages[imageIndex] ?? null;
+  const currentImageSrc = imageUrl(currentImagePath);
 
   return (
     <>
@@ -129,6 +209,26 @@ export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerPr
                 <div className="flex items-center gap-1.5">
                   {post.status === "completed" && (
                     <>
+                      {/* Reimagine button */}
+                      {post.generated_image_url && (
+                        <button
+                          onClick={handleReimagine}
+                          disabled={isReimaging}
+                          className={cn(
+                            "flex items-center gap-1 px-2.5 py-1 text-xs rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                            isReimaging
+                              ? "bg-violet-950/60 border border-violet-800/60 text-violet-400"
+                              : "bg-zinc-800 text-zinc-300 hover:bg-violet-900/40 hover:text-violet-300 hover:border-violet-800 border border-transparent"
+                          )}
+                        >
+                          {isReimaging ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={12} />
+                          )}
+                          {isReimaging ? "Generating…" : "Reimagine"}
+                        </button>
+                      )}
                       <button
                         onClick={handleCopy}
                         disabled={!post.copy_ready_text}
@@ -137,7 +237,7 @@ export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerPr
                         {copied ? <CheckCheck size={12} className="text-green-400" /> : <Copy size={12} />}
                         Copy
                       </button>
-                      {(post.download_image_url ?? post.generated_image_url) && (
+                      {currentImageSrc && (
                         <button
                           onClick={handleDownload}
                           className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
@@ -169,18 +269,76 @@ export default function PostDetailDrawer({ postId, onClose }: PostDetailDrawerPr
                 </div>
               ) : (
                 <>
-                  {/* Generated image */}
-                  {post.generated_image_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={imageUrl(post.generated_image_url) ?? ""}
-                      alt="Generated"
-                      className="w-full rounded-lg object-cover border border-zinc-800"
-                      onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
-                    />
-                  ) : (
-                    <div className="aspect-video bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-700">
-                      <ImageOff size={24} />
+                  {/* ── Image Carousel ── */}
+                  <div className="relative">
+                    {/* Image or placeholder */}
+                    {currentImageSrc ? (
+                      <div className="relative">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={currentImageSrc}
+                          alt={`Version ${imageIndex + 1}`}
+                          className="w-full rounded-lg object-cover border border-zinc-800"
+                          onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                        />
+                        {/* Reimagining overlay */}
+                        {isReimaging && (
+                          <div className="absolute inset-0 rounded-lg bg-black/60 flex flex-col items-center justify-center gap-2">
+                            <Loader2 size={20} className="animate-spin text-violet-400" />
+                            <span className="text-xs text-violet-300 font-medium">Generating new version…</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="aspect-video bg-zinc-900 border border-zinc-800 rounded-lg flex items-center justify-center text-zinc-700">
+                        <ImageOff size={24} />
+                      </div>
+                    )}
+
+                    {/* Carousel navigation — only shown when there are multiple versions */}
+                    {allImages.length > 1 && (
+                      <>
+                        <button
+                          onClick={() => setImageIndex((i) => Math.max(0, i - 1))}
+                          disabled={imageIndex === 0}
+                          className="absolute left-2 top-1/2 -translate-y-1/2 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
+                        >
+                          <ChevronLeft size={16} />
+                        </button>
+                        <button
+                          onClick={() => setImageIndex((i) => Math.min(allImages.length - 1, i + 1))}
+                          disabled={imageIndex === allImages.length - 1}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
+                        >
+                          <ChevronRight size={16} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Version indicator + dots */}
+                  {allImages.length > 1 && (
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="flex items-center gap-1.5">
+                        {allImages.map((_, i) => (
+                          <button
+                            key={i}
+                            onClick={() => setImageIndex(i)}
+                            className={cn(
+                              "rounded-full transition-all",
+                              i === imageIndex
+                                ? "w-4 h-1.5 bg-violet-500"
+                                : "w-1.5 h-1.5 bg-zinc-600 hover:bg-zinc-400"
+                            )}
+                          />
+                        ))}
+                      </div>
+                      <p className="text-[10px] text-zinc-600">
+                        Version {imageIndex + 1} of {allImages.length}
+                        {imageIndex === allImages.length - 1 && allImages.length > 1 && (
+                          <span className="ml-1.5 text-violet-500">• Latest</span>
+                        )}
+                      </p>
                     </div>
                   )}
 

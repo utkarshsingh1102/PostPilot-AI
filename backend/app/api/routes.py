@@ -20,8 +20,24 @@ Endpoint summary:
 """
 
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Optional
+
+# Visual variation styles injected into the reimagine prompt to ensure each
+# generation looks distinctly different while keeping faces identical.
+_REIMAGINE_STYLES = [
+    "bold dramatic lighting with deep shadows and high contrast",
+    "bright outdoor daylight with open sky and lush nature",
+    "warm golden-hour sunset tones with cinematic lens flare",
+    "sleek modern indoor office with floor-to-ceiling glass windows",
+    "vibrant urban cityscape at twilight with neon accent lights",
+    "clean minimal studio setting on a soft gradient background",
+    "dynamic action framing, slightly off-centre with motion blur background",
+    "executive portrait style — dark vignette with a single sharp spotlight",
+    "cool futuristic tech aesthetic with blue-toned holographic atmosphere",
+    "editorial magazine style with artistic shallow depth of field",
+]
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -33,15 +49,20 @@ from app.api.schemas import (
     SourceCreate, SourceResponse,
     ScrapedPostResponse, ProcessedPostResponse,
     FullPostResponse, ProcessResponse, BulkProcessResponse,
-    ApprovalAction, ApprovalResponse,
+    ApprovalAction, ApprovalResponse, ReimagineResponse,
+    ImageVersionResponse,
 )
 from app.services.claude_rewriter import rewrite_post, build_copy_ready_text
 from app.services.gemini_image_generator import generate_image, get_download_url
 from app.scheduler.cron_jobs import _process_one, scrape_all_sources
+from app.models import PostImageVersion
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Tracks currently active manual scrape jobs: "all" or str(source_id)
+_active_scrapes: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +100,12 @@ def scheduler_status(request: Request):
             "last_run": last_run.astimezone(IST).isoformat() if last_run else None,
         })
     return {"jobs": jobs}
+
+
+@router.get("/scraping/status", tags=["system"])
+def scraping_status():
+    """Returns whether a manual scrape is currently running."""
+    return {"active": len(_active_scrapes) > 0, "jobs": sorted(_active_scrapes)}
 
 
 @router.post("/sources", response_model=SourceResponse, status_code=201, tags=["sources"])
@@ -238,6 +265,11 @@ def get_full_post(post_id: int, request: Request, db: Session = Depends(get_db))
             processed.hashtags or [],
         )
 
+    image_versions = (
+        [ImageVersionResponse.model_validate(v) for v in processed.image_versions]
+        if processed else []
+    )
+
     return FullPostResponse(
         scraped_post_id=scraped.id,
         source_id=scraped.source_id,
@@ -253,6 +285,8 @@ def get_full_post(post_id: int, request: Request, db: Session = Depends(get_db))
         generated_image_url=processed.generated_image_url if processed else None,
         download_image_url=download_url,
         copy_ready_text=copy_ready,
+        reimagine_status=processed.reimagine_status if processed else "idle",
+        image_versions=image_versions,
         status=processed.status.value if processed else "unprocessed",
     )
 
@@ -277,10 +311,13 @@ async def scrape_now(
         if not source:
             raise HTTPException(status_code=404, detail="Source not found.")
 
+        _job_key = str(source_id)
+
         async def _scrape_one():
             from app.database import SessionLocal as _SL
             from app.models import ScrapedPost as _SP
             from app.services.linkedin_scraper import scrape_source
+            _active_scrapes.add(_job_key)
             _db = _SL()
             since_date = settings.scrape_since_datetime
             try:
@@ -304,6 +341,7 @@ async def scrape_now(
                 logger.info("Manual scrape: saved %d new post(s) from source id=%d.", new_count, source.id)
             finally:
                 _db.close()
+                _active_scrapes.discard(_job_key)
 
         background_tasks.add_task(_scrape_one)
         return {
@@ -311,7 +349,14 @@ async def scrape_now(
                        "Poll GET /api/v1/posts/raw?approval_status=pending_review to see new posts."
         }
 
-    background_tasks.add_task(scrape_all_sources)
+    async def _scrape_all_tracked():
+        _active_scrapes.add("all")
+        try:
+            await scrape_all_sources()
+        finally:
+            _active_scrapes.discard("all")
+
+    background_tasks.add_task(_scrape_all_tracked)
     sources_count = db.query(Source).count()
     return {
         "message": f"Scraping all {sources_count} source(s) in background. "
@@ -400,3 +445,121 @@ async def process_all(background_tasks: BackgroundTasks, db: Session = Depends(g
         triggered=len(approved_pending),
         message=f"Processing queued for {len(approved_pending)} approved post(s).",
     )
+
+
+# ---------------------------------------------------------------------------
+# Reimagine — regenerate Gemini image for an already-processed post
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/posts/processed/{processed_post_id}/reimagine",
+    response_model=ReimagineResponse,
+    tags=["processing"],
+)
+async def reimagine_post(
+    processed_post_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Regenerate the Gemini image for an already-processed post.
+
+    - Creates a new PostImageVersion entry with the result.
+    - Updates processed_post.generated_image_url to the new image.
+    - Preserves all previous versions for the slideshow.
+    - Sets reimagine_status to 'generating' while running, 'idle' when done.
+    """
+    processed = db.query(ProcessedPost).get(processed_post_id)
+    if not processed:
+        raise HTTPException(status_code=404, detail="Processed post not found.")
+
+    if processed.status != ProcessingStatus.completed:
+        raise HTTPException(
+            status_code=400,
+            detail="Post must be fully processed before reimagining.",
+        )
+
+    if processed.reimagine_status == "generating":
+        return ReimagineResponse(
+            processed_post_id=processed_post_id,
+            status="generating",
+            message="Already generating — please wait.",
+        )
+
+    # Mark as generating immediately so the frontend can disable the button
+    processed.reimagine_status = "generating"
+    db.commit()
+
+    background_tasks.add_task(_run_reimagine, processed_post_id)
+    logger.info("Reimagine started for processed_post id=%d.", processed_post_id)
+
+    return ReimagineResponse(
+        processed_post_id=processed_post_id,
+        status="generating",
+        message="Reimagine started. Poll GET /posts/{scraped_post_id} for the result.",
+    )
+
+
+async def _run_reimagine(processed_post_id: int) -> None:
+    """Background task: call Gemini, save a new image version, update the post."""
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        processed = db.query(ProcessedPost).get(processed_post_id)
+        if not processed:
+            return
+
+        # Find the original scraped image to use as reference
+        scraped = processed.scraped_post
+        original_image = scraped.image_url if scraped else None
+
+        variation_hint = random.choice(_REIMAGINE_STYLES)
+        logger.info(
+            "[reimagine] Generating new image for processed_post id=%d (style: %s).",
+            processed_post_id, variation_hint,
+        )
+        new_path = await generate_image(
+            rewritten_post=processed.rewritten_post or "",
+            original_image_path=original_image,
+            variation_hint=variation_hint,
+        )
+
+        if new_path:
+            # If this is the first reimagine and there are no version records yet,
+            # backfill the original generated image as version 1 so the carousel
+            # shows both the original and new version side-by-side.
+            if not processed.image_versions and processed.generated_image_url:
+                db.add(PostImageVersion(
+                    processed_post_id=processed_post_id,
+                    image_path=processed.generated_image_url,
+                ))
+                db.flush()  # persist v1 before v2 so ordering is correct
+
+            # Save the new image as the next version
+            db.add(PostImageVersion(
+                processed_post_id=processed_post_id,
+                image_path=new_path,
+            ))
+            processed.generated_image_url = new_path
+            logger.info(
+                "[reimagine] New image saved for processed_post id=%d: %s",
+                processed_post_id, new_path,
+            )
+        else:
+            logger.warning(
+                "[reimagine] Gemini returned no image for processed_post id=%d.", processed_post_id
+            )
+
+        processed.reimagine_status = "idle"
+        db.commit()
+    except Exception as exc:
+        logger.error("[reimagine] Failed for processed_post id=%d: %s", processed_post_id, exc)
+        try:
+            processed = db.query(ProcessedPost).get(processed_post_id)
+            if processed:
+                processed.reimagine_status = "idle"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()

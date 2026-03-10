@@ -1,5 +1,6 @@
 export type ApprovalStatus = "pending_review" | "approved" | "rejected";
 export type ProcessingStatus = "pending" | "processing" | "completed" | "failed";
+export type ReimagineStatus = "idle" | "generating";
 
 export interface ScrapedPost {
   id: number;
@@ -13,6 +14,12 @@ export interface ScrapedPost {
   created_at: string;
 }
 
+export interface ImageVersion {
+  id: number;
+  image_path: string;
+  created_at: string;
+}
+
 export interface ProcessedPost {
   id: number;
   scraped_post_id: number | null;
@@ -22,6 +29,7 @@ export interface ProcessedPost {
   hooks: string | null;
   hashtags: string[] | null;
   generated_image_url: string | null;
+  reimagine_status: ReimagineStatus;
   status: ProcessingStatus;
   error_message: string | null;
   created_at: string;
@@ -43,5 +51,7 @@ export interface FullPost {
   generated_image_url: string | null;
   download_image_url: string | null;
   copy_ready_text: string | null;
-  status: ProcessingStatus;
+  reimagine_status: ReimagineStatus;
+  image_versions: ImageVersion[];
+  status: ProcessingStatus | "unprocessed";
 }

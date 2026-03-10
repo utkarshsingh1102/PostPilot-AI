@@ -68,7 +68,11 @@ export async function getFullPost(id: number): Promise<FullPost> {
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 export async function scrapeNow(sourceId?: number): Promise<{ message: string }> {
-  const { data } = await apiClient.post("/scrape-now", sourceId ? { source_id: sourceId } : {});
+  const { data } = await apiClient.post(
+    "/scrape-now",
+    undefined,
+    sourceId ? { params: { source_id: sourceId } } : undefined,
+  );
   return data;
 }
 
@@ -82,4 +86,14 @@ export async function processAll(): Promise<{ triggered: number; message: string
 export async function checkHealth(): Promise<boolean> {
   await apiClient.get("/health", { timeout: 5000 });
   return true;
+}
+
+export async function getScrapingStatus(): Promise<{ active: boolean; jobs: string[] }> {
+  const { data } = await apiClient.get("/scraping/status");
+  return data;
+}
+
+export async function reimaginePost(processedPostId: number): Promise<{ status: string; message: string }> {
+  const { data } = await apiClient.post(`/posts/processed/${processedPostId}/reimagine`);
+  return data;
 }

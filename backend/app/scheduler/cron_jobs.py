@@ -22,11 +22,22 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Source, ScrapedPost, ProcessedPost, ProcessingStatus, ApprovalStatus
+from app.models import Source, ScrapedPost, ProcessedPost, PostImageVersion, ProcessingStatus, ApprovalStatus
 from app.services.linkedin_scraper import scrape_source
 from app.services.claude_rewriter import rewrite_post, build_copy_ready_text
+from app.services.gemini_image_generator import generate_image
 
 logger = logging.getLogger(__name__)
+
+# Extensions that Gemini can process as static images
+_STATIC_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _is_static_image(path_or_url: str) -> bool:
+    """Return True only for static image formats that Gemini can enhance."""
+    from pathlib import Path as _Path
+    suffix = _Path(path_or_url.split("?")[0]).suffix.lower()
+    return suffix in _STATIC_IMAGE_EXTS
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +53,7 @@ async def _process_one(db: Session, scraped: ScrapedPost) -> None:
         processed = ProcessedPost(
             scraped_post_id=scraped.id,
             source_id=scraped.source_id,
-            source_label=source.label if source else Non1e,
+            source_label=source.label if source else None,
             status=ProcessingStatus.pending,
         )
         db.add(processed)
@@ -78,8 +89,28 @@ async def _process_one(db: Session, scraped: ScrapedPost) -> None:
         processed.hooks = rewrite_result["hooks"]
         processed.hashtags = rewrite_result["hashtags"]
 
-        # ---- Use scraped image as output ----
-        processed.generated_image_url = scraped.image_url
+        # ---- Gemini image generation (only for static images) ----
+        if scraped.image_url and _is_static_image(scraped.image_url):
+            logger.info("[cron] Generating image via Gemini for scraped_post id=%d.", scraped.id)
+            generated_path = await generate_image(
+                rewritten_post=rewrite_result["rewritten_post"],
+                original_image_path=scraped.image_url,
+            )
+            # If Gemini fails, fall back to the original scraped image
+            final_image = generated_path or scraped.image_url
+            processed.generated_image_url = final_image
+            # Save as version v1 so the slideshow has it
+            if generated_path:
+                db.add(PostImageVersion(processed_post_id=processed.id, image_path=generated_path))
+        elif scraped.image_url:
+            # GIF, MP4, or other media — pass through as-is, no Gemini processing
+            logger.info(
+                "[cron] Non-static media detected for scraped_post id=%d (%s) — passing through.",
+                scraped.id, scraped.image_url,
+            )
+            processed.generated_image_url = scraped.image_url
+        else:
+            processed.generated_image_url = None
 
         processed.status = ProcessingStatus.completed
         processed.error_message = None

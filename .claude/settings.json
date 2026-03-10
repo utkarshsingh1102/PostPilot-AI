@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PGPASSWORD=password psql -U postgres -h localhost -d postpilot -c \"SELECT id, linkedin_url, label, created_at FROM sources ORDER BY id;\")",
+      "Bash(alembic upgrade head)",
+      "Bash(PGPASSWORD=password psql -U postgres -h localhost -d postpilot -c \"\\\\d processed_posts\")",
+      "Bash(PGPASSWORD=password psql -U postgres -h localhost -d postpilot -c \"\\\\dt post_image*\")",
+      "Bash(PGPASSWORD=password psql -U postgres -h localhost -d postpilot -c \"ALTER TABLE processed_posts ADD COLUMN reimagine_status VARCHAR NOT NULL DEFAULT ''idle'';\")",
+      "Bash(alembic stamp 001_add_image_versions)",
+      "Bash(grep -r \"sqlalchemy\" /Users/utkarshsingh/PostPilot-AI/backend/requirements*.txt)"
+    ]
+  }
+}

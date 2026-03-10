@@ -69,6 +69,18 @@ class ApprovalResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Image version schemas
+# ---------------------------------------------------------------------------
+
+class ImageVersionResponse(BaseModel):
+    id: int
+    image_path: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
 # Processed post schemas
 # ---------------------------------------------------------------------------
 
@@ -81,6 +93,7 @@ class ProcessedPostResponse(BaseModel):
     hooks: Optional[str]
     hashtags: Optional[list[str]]
     generated_image_url: Optional[str]
+    reimagine_status: str = "idle"
     status: str
     error_message: Optional[str]
     created_at: datetime
@@ -109,6 +122,8 @@ class FullPostResponse(BaseModel):
     generated_image_url: Optional[str]
     download_image_url: Optional[str]
     copy_ready_text: Optional[str]
+    reimagine_status: str = "idle"
+    image_versions: list[ImageVersionResponse] = []
     status: str
 
     model_config = {"from_attributes": True}
@@ -123,4 +138,10 @@ class ProcessResponse(BaseModel):
 
 class BulkProcessResponse(BaseModel):
     triggered: int
+    message: str
+
+
+class ReimagineResponse(BaseModel):
+    processed_post_id: int
+    status: str
     message: str
